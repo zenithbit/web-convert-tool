@@ -1,23 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 // import DictionaryTrie from "./core/DictionaryTrie.js"; <--- XÓA DÒNG NÀY (UI không cần biết Trie là gì nữa)
-import type { TokenData } from "./types.ts";
-import { addToUserDict, loadUserDict } from "./utils/storage.js";
-import { downloadTxtFile, generateCleanText } from "./utils/exporter.js";
-import Token from "./components/Token.js";
-import QuickEdit from "./components/QuickEdit.js";
 import DictionaryManager from "./components/DictionaryManager.js";
+import QuickEdit from "./components/QuickEdit.js";
 import ReadingSettings, { type AppSettings } from "./components/ReadingSettings.js";
+import Token from "./components/Token.js";
+import useMobile from "./hooks/useMobile.js";
+import type { TokenData } from "./types.ts";
+import { downloadTxtFile, generateCleanText } from "./utils/exporter.js";
+import { addToUserDict, loadUserDict } from "./utils/storage.js";
 
 function App() {
+  const isMobile = useMobile(); // Kiểm tra xem có đang dùng đt không
+  const [activeTab, setActiveTab] = useState<'input' | 'reader'>('input');
   const workerRef = useRef<Worker | null>(null);
 
   const [inputText, setInputText] = useState("你好世界。我是开发者。");
+
+  const [isSaved, setIsSaved] = useState(true);
   const [loading, setLoading] = useState(true);
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [showDictManager, setShowDictManager] = useState(false);
 
-  // State cấu hình mặc định
+  // State cấu hình mặc định (có lưu LocalStorage)
   const [settings, setSettings] = useState<AppSettings>(() => {
     const saved = localStorage.getItem('app_settings');
     return saved ? JSON.parse(saved) : {
@@ -27,11 +32,12 @@ function App() {
     };
   });
 
+  // Lưu cấu hình mỗi khi thay đổi
   useEffect(() => {
     localStorage.setItem('app_settings', JSON.stringify(settings));
   }, [settings]);
 
-  // --- CHỈ GIỮ LẠI 1 USE EFFECT DUY NHẤT DÀNH CHO WORKER ---
+  // --- USE EFFECT KHỞI TẠO WORKER ---
   useEffect(() => {
     // 1. Khởi tạo Worker
     const worker = new Worker(new URL('./core/convert.worker.ts', import.meta.url), { type: 'module' });
@@ -75,20 +81,40 @@ function App() {
     };
   }, []);
 
+  // --- USE EFFECT LOAD BẢN NHÁP ---
+  useEffect(() => {
+    const savedDraft = localStorage.getItem('draft_input');
+    if (savedDraft) {
+      setInputText(savedDraft);
+    }
+  }, []);
+
+  // --- USE EFFECT AUTO-SAVE ---
+  useEffect(() => {
+    setIsSaved(false); // Đánh dấu là chưa lưu (đang gõ)
+
+    const timeoutId = setTimeout(() => {
+      localStorage.setItem('draft_input', inputText);
+      setIsSaved(true); // Đã lưu xong
+    }, 1000); // Đợi user ngừng gõ 1s mới lưu
+
+    return () => clearTimeout(timeoutId);
+  }, [inputText]);
+
+  // --- CÁC HÀM XỬ LÝ LOGIC ---
+
   const handleDictChange = () => {
     if (!workerRef.current) return;
 
-    // Chúng ta gửi lại lệnh INIT để Worker load lại từ đầu (cả Base + User Dict mới)
-    // Cách này hơi "thô" nhưng an toàn nhất. 
-    // Cách tối ưu hơn là gửi lệnh DELETE sang worker, nhưng worker hiện chưa hỗ trợ delete.
+    // Gửi lại lệnh INIT để Worker load lại từ đầu (cả Base + User Dict mới)
     const initData = async () => {
       const response = await fetch('/vietphrase.json');
       const baseData = await response.json();
-      const userData = loadUserDict(); // Load lại data mới nhất từ storage
+      const userData = loadUserDict();
       const mergedData = { ...baseData, ...userData };
 
       workerRef.current?.postMessage({ type: 'INIT', payload: mergedData });
-      // Sau khi init xong, ta có thể tự động convert lại luôn
+      // Sau khi init xong, tự động convert lại luôn
       workerRef.current?.postMessage({ type: 'TRANSLATE', payload: inputText });
     };
     initData();
@@ -96,10 +122,12 @@ function App() {
 
   const handleConvert = () => {
     if (!workerRef.current) return;
-
-    // UI không lo tính toán nữa, chỉ gửi lệnh
     console.time("TranslateWorker");
     workerRef.current.postMessage({ type: 'TRANSLATE', payload: inputText });
+
+    if (isMobile) {
+      setActiveTab('reader'); // Tự động nhảy sang tab đọc
+    }
   };
 
   const handleSelectMeaning = (newMeaning: string, isMassUpdate = false) => {
@@ -110,13 +138,14 @@ function App() {
     const newTokens = [...tokens];
 
     if (isMassUpdate) {
+      // Logic sửa hàng loạt
       newTokens.forEach((token, idx) => {
         if (token.origin === currentToken.origin) {
           newTokens[idx] = { ...token, display: newMeaning };
         }
       });
 
-      // 🔥 Gửi lệnh UPDATE cho Worker để nó cập nhật Trie bên kia
+      // 🔥 Gửi lệnh UPDATE cho Worker
       if (workerRef.current && currentToken.origin) {
         workerRef.current.postMessage({
           type: 'UPDATE_WORD',
@@ -124,16 +153,15 @@ function App() {
         });
       }
 
-      // Lưu LocalStorage (Vẫn giữ ở UI thread)
+      // Lưu LocalStorage
       if (currentToken.origin) {
         addToUserDict(currentToken.origin, newMeaning);
       }
     } else {
+      // Logic sửa 1 từ
       newTokens[selectedIndex] = {
-        type: currentToken.type,
-        ...(currentToken.origin !== undefined && { origin: currentToken.origin }),
+        ...currentToken,
         display: newMeaning,
-        meanings: currentToken.meanings,
       };
     }
 
@@ -141,7 +169,6 @@ function App() {
     // setSelectedIndex(null); 
   };
 
-  // ... (Phần handleCopy và handleDownload giữ nguyên như cũ)
   const handleCopy = () => {
     const textResult = tokens.map((t) => t.display).join(" ");
     const cleanText = textResult
@@ -161,83 +188,181 @@ function App() {
     downloadTxtFile(text, `convert-${Date.now()}.txt`);
   };
 
-  return (
-    <div style={{ padding: 20, paddingBottom: 100, backgroundColor: '#121212', minHeight: '100vh', color: '#eee', fontFamily: 'Arial' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1>Web Convert Tool (Pro Worker)</h1>
+  const handleClear = () => {
+    if (window.confirm("Bác có chắc muốn xóa trắng toàn bộ không?")) {
+      setInputText("");
+      setTokens([]);
+      localStorage.removeItem('draft_input');
+    }
+  };
 
-        {/* Nút mở quản lý từ điển */}
+  return (
+    <div style={{
+      padding: isMobile ? 10 : 20,
+      paddingBottom: 100,
+      backgroundColor: '#121212',
+      minHeight: '100vh',
+      color: '#eee',
+      fontFamily: 'Arial',
+      display: 'flex',
+      flexDirection: 'column'
+    }}>
+      {/* HEADER */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <h1 style={{ fontSize: isMobile ? '1.2rem' : '2rem', margin: 0 }}>
+          {isMobile ? 'Convert Tool' : 'Web Convert Tool (Pro)'}
+        </h1>
         <button
           onClick={() => setShowDictManager(true)}
           style={{
-            backgroundColor: '#4b5563', color: '#fff', border: 'none',
-            padding: '8px 16px', borderRadius: '6px', cursor: 'pointer',
-            fontSize: '14px', fontWeight: 'bold'
+            padding: '8px 16px',
+            backgroundColor: '#374151',
+            color: 'white',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+            fontSize: isMobile ? '14px' : '16px',
+            fontWeight: 'bold'
           }}
         >
-          📚 Quản lý Từ điển
+          {isMobile ? '📚 Từ điển' : '📚 Quản lý Từ điển'}
         </button>
       </div>
+
       <ReadingSettings settings={settings} onUpdate={setSettings} />
-      {loading ? (
-        <p style={{ color: 'yellow' }}>⏳ Đang khởi động Worker...</p>
-      ) : (
-        <p style={{ color: "#4ade80" }}>⚡ Dữ liệu đã sẵn sàng!</p>
+
+      {/* STATUS BAR */}
+      <div style={{ marginBottom: 10, fontSize: '14px' }}>
+        {loading ? (
+          <span style={{ color: 'yellow' }}>⏳ Đang khởi động Worker...</span>
+        ) : (
+          <span style={{ color: "#4ade80" }}>⚡ Dữ liệu đã sẵn sàng!</span>
+        )}
+      </div>
+
+      {/* THANH TAB CHO MOBILE */}
+      {isMobile && (
+        <div style={{ display: 'flex', marginBottom: 15, borderBottom: '1px solid #333' }}>
+          <button
+            onClick={() => setActiveTab('input')}
+            style={{
+              flex: 1, padding: 10, background: 'none', border: 'none',
+              color: activeTab === 'input' ? '#2563eb' : '#888',
+              borderBottom: activeTab === 'input' ? '2px solid #2563eb' : 'none',
+              fontWeight: 'bold'
+            }}>
+            1. Nhập Truyện
+          </button>
+          <button
+            onClick={() => setActiveTab('reader')}
+            style={{
+              flex: 1, padding: 10, background: 'none', border: 'none',
+              color: activeTab === 'reader' ? '#10b981' : '#888',
+              borderBottom: activeTab === 'reader' ? '2px solid #10b981' : 'none',
+              fontWeight: 'bold'
+            }}>
+            2. Đọc & Sửa
+          </button>
+        </div>
       )}
 
-      <div style={{ display: "flex", gap: 20 }}>
-        <textarea
-          rows={15}
-          style={{ width: '50%', backgroundColor: '#222', color: '#fff', padding: 10, border: '1px solid #444' }}
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          placeholder="Paste truyện tiếng Trung vào đây (thử paste 10 chương xem)..."
-        />
+      {/* CONTAINER CHÍNH */}
+      <div style={{
+        display: "flex",
+        gap: 20,
+        flexDirection: isMobile ? 'column' : 'row'
+      }}>
 
-        {/* Output Area */}
-        <div style={{ width: "50%", display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div
-            style={{
-              border: "1px solid #444",
-              padding: 10,
-              flex: 1,
-              minHeight: 300,
-              borderRadius: 4,
-              overflowY: 'auto',
-              maxHeight: '600px', // Giới hạn chiều cao để scroll
-              fontSize: `${settings.fontSize}px`,
-              lineHeight: settings.lineHeight,
-              fontFamily: settings.fontFamily,
-              transition: 'all 0.2s ease' // Hiệu ứng mượt khi đổi số
-            }}
-          >
-            {tokens.length > 0 ? tokens.map((token, index) => (
-              <Token
-                key={index}
-                data={token}
-                isSelected={index === selectedIndex}
-                onClick={() => setSelectedIndex(index)}
-              />
-            )) : <span style={{ color: '#666' }}>Kết quả hiển thị tại đây...</span>}
-          </div>
+        {/* --- CỘT TRÁI: INPUT --- */}
+        {(!isMobile || activeTab === 'input') && (
+          <div style={{ width: isMobile ? '100%' : '50%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* Thanh trạng thái lưu & nút xóa */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '12px', color: isSaved ? '#10b981' : '#f59e0b' }}>
+                {isSaved ? '✅ Đã lưu nháp' : '✍️ Đang nhập...'}
+              </span>
 
-          {/* Toolbar Buttons */}
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={handleCopy} style={{ padding: 10, flex: 1, cursor: 'pointer', backgroundColor: '#374151', color: 'white', border: 'none', borderRadius: 4 }}>📋 Copy</button>
-            <button onClick={handleDownload} style={{ padding: 10, flex: 1, cursor: 'pointer', backgroundColor: '#059669', color: 'white', border: 'none', borderRadius: 4 }}>⬇️ Tải file</button>
+              {inputText && (
+                <button
+                  onClick={handleClear}
+                  style={{
+                    background: 'none', border: 'none', color: '#ef4444',
+                    cursor: 'pointer', fontSize: '12px', textDecoration: 'underline'
+                  }}
+                >
+                  Xóa trắng
+                </button>
+              )}
+            </div>
+
+            <textarea
+              rows={isMobile ? 12 : 15}
+              style={{
+                width: '100%',
+                backgroundColor: '#222', color: '#fff',
+                padding: 10, border: '1px solid #444',
+                boxSizing: 'border-box',
+                fontSize: '16px'
+              }}
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="Paste truyện tiếng Trung vào đây..."
+            />
+
+            {/* Nút Convert (Hiện ở đây cho cả Desktop và Mobile Input Tab) */}
+            <button
+              onClick={handleConvert}
+              disabled={loading}
+              style={{
+                padding: "12px", backgroundColor: '#2563eb', color: 'white',
+                border: 'none', borderRadius: 6, fontSize: 16, fontWeight: 'bold', width: '100%', cursor: 'pointer'
+              }}
+            >
+              🚀 Convert Ngay
+            </button>
           </div>
-        </div>
+        )}
+
+        {/* --- CỘT PHẢI: OUTPUT --- */}
+        {(!isMobile || activeTab === 'reader') && (
+          <div style={{ width: isMobile ? '100%' : '50%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div
+              style={{
+                border: "1px solid #444",
+                padding: isMobile ? 15 : 10,
+                flex: 1,
+                minHeight: isMobile ? '60vh' : 300,
+                backgroundColor: "#1e1e1e",
+                borderRadius: 4,
+                overflowY: 'auto',
+                maxHeight: isMobile ? '75vh' : '600px',
+
+                // Style từ settings
+                fontSize: `${settings.fontSize}px`,
+                lineHeight: settings.lineHeight,
+                fontFamily: settings.fontFamily,
+              }}
+            >
+              {tokens.length > 0 ? tokens.map((token, index) => (
+                <Token
+                  key={index}
+                  data={token}
+                  isSelected={index === selectedIndex}
+                  onClick={() => setSelectedIndex(index)}
+                />
+              )) : <span style={{ color: '#666' }}>Kết quả hiển thị tại đây...</span>}
+            </div>
+
+            {/* Toolbar Buttons */}
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={handleCopy} style={{ padding: 12, flex: 1, cursor: 'pointer', backgroundColor: '#374151', color: 'white', border: 'none', borderRadius: 4, fontWeight: 'bold' }}>📋 Copy</button>
+              <button onClick={handleDownload} style={{ padding: 12, flex: 1, cursor: 'pointer', backgroundColor: '#059669', color: 'white', border: 'none', borderRadius: 4, fontWeight: 'bold' }}>⬇️ Tải file</button>
+            </div>
+          </div>
+        )}
       </div>
-      <br />
 
-      <button
-        onClick={handleConvert}
-        disabled={loading}
-        style={{ padding: "12px 24px", backgroundColor: '#2563eb', color: 'white', border: 'none', borderRadius: 6, fontSize: 16, cursor: 'pointer', fontWeight: 'bold' }}
-      >
-        🚀 Convert (Đa luồng)
-      </button>
-
+      {/* Modals */}
       {showDictManager && (
         <DictionaryManager
           onClose={() => setShowDictManager(false)}
@@ -252,7 +377,7 @@ function App() {
           onClose={() => setSelectedIndex(null)}
         />
       )}
-    </div>
+    </div >
   );
 }
 
