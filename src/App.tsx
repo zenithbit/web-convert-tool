@@ -5,6 +5,8 @@ import { addToUserDict, loadUserDict } from "./utils/storage.js";
 import { downloadTxtFile, generateCleanText } from "./utils/exporter.js";
 import Token from "./components/Token.js";
 import QuickEdit from "./components/QuickEdit.js";
+import DictionaryManager from "./components/DictionaryManager.js";
+import ReadingSettings, { type AppSettings } from "./components/ReadingSettings.js";
 
 function App() {
   const workerRef = useRef<Worker | null>(null);
@@ -13,6 +15,21 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [showDictManager, setShowDictManager] = useState(false);
+
+  // State cấu hình mặc định
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    const saved = localStorage.getItem('app_settings');
+    return saved ? JSON.parse(saved) : {
+      fontSize: 18,
+      lineHeight: 1.8,
+      fontFamily: "'Times New Roman', serif" // Mặc định để font có chân đọc truyện cho sướng
+    };
+  });
+
+  useEffect(() => {
+    localStorage.setItem('app_settings', JSON.stringify(settings));
+  }, [settings]);
 
   // --- CHỈ GIỮ LẠI 1 USE EFFECT DUY NHẤT DÀNH CHO WORKER ---
   useEffect(() => {
@@ -57,6 +74,25 @@ function App() {
       worker.terminate();
     };
   }, []);
+
+  const handleDictChange = () => {
+    if (!workerRef.current) return;
+
+    // Chúng ta gửi lại lệnh INIT để Worker load lại từ đầu (cả Base + User Dict mới)
+    // Cách này hơi "thô" nhưng an toàn nhất. 
+    // Cách tối ưu hơn là gửi lệnh DELETE sang worker, nhưng worker hiện chưa hỗ trợ delete.
+    const initData = async () => {
+      const response = await fetch('/vietphrase.json');
+      const baseData = await response.json();
+      const userData = loadUserDict(); // Load lại data mới nhất từ storage
+      const mergedData = { ...baseData, ...userData };
+
+      workerRef.current?.postMessage({ type: 'INIT', payload: mergedData });
+      // Sau khi init xong, ta có thể tự động convert lại luôn
+      workerRef.current?.postMessage({ type: 'TRANSLATE', payload: inputText });
+    };
+    initData();
+  };
 
   const handleConvert = () => {
     if (!workerRef.current) return;
@@ -127,7 +163,22 @@ function App() {
 
   return (
     <div style={{ padding: 20, paddingBottom: 100, backgroundColor: '#121212', minHeight: '100vh', color: '#eee', fontFamily: 'Arial' }}>
-      <h1>Web Convert Tool (Pro Worker)</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h1>Web Convert Tool (Pro Worker)</h1>
+
+        {/* Nút mở quản lý từ điển */}
+        <button
+          onClick={() => setShowDictManager(true)}
+          style={{
+            backgroundColor: '#4b5563', color: '#fff', border: 'none',
+            padding: '8px 16px', borderRadius: '6px', cursor: 'pointer',
+            fontSize: '14px', fontWeight: 'bold'
+          }}
+        >
+          📚 Quản lý Từ điển
+        </button>
+      </div>
+      <ReadingSettings settings={settings} onUpdate={setSettings} />
       {loading ? (
         <p style={{ color: 'yellow' }}>⏳ Đang khởi động Worker...</p>
       ) : (
@@ -151,11 +202,13 @@ function App() {
               padding: 10,
               flex: 1,
               minHeight: 300,
-              lineHeight: "1.8",
-              backgroundColor: "#1e1e1e",
               borderRadius: 4,
               overflowY: 'auto',
-              maxHeight: '600px' // Giới hạn chiều cao để scroll
+              maxHeight: '600px', // Giới hạn chiều cao để scroll
+              fontSize: `${settings.fontSize}px`,
+              lineHeight: settings.lineHeight,
+              fontFamily: settings.fontFamily,
+              transition: 'all 0.2s ease' // Hiệu ứng mượt khi đổi số
             }}
           >
             {tokens.length > 0 ? tokens.map((token, index) => (
@@ -184,6 +237,13 @@ function App() {
       >
         🚀 Convert (Đa luồng)
       </button>
+
+      {showDictManager && (
+        <DictionaryManager
+          onClose={() => setShowDictManager(false)}
+          onDataChanged={handleDictChange}
+        />
+      )}
 
       {selectedIndex !== null && tokens[selectedIndex] && (
         <QuickEdit
